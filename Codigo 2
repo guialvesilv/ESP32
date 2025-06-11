@@ -1,0 +1,166 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <DHT.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
+
+#define ID "esp1.anselmo"
+#define LED_PIN 2
+#define INTERVALO_ENVIO_MS 10000
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// Wi-Fi e Adafruit IO
+#define WLAN_SSID       ""
+#define WLAN_PASS       ""
+#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVERPORT  1883
+#define AIO_USERNAME    ""
+#define AIO_KEY         ""
+
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+// Feeds
+Adafruit_MQTT_Publish temperaturaFeed1 = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperatura1");
+Adafruit_MQTT_Publish umidadeFeed1     = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/umidade1");
+Adafruit_MQTT_Publish idFeed1          = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/id");
+
+Adafruit_MQTT_Publish temperaturaFeed2 = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperatura2");
+Adafruit_MQTT_Publish umidadeFeed2     = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/umidade2");
+Adafruit_MQTT_Publish idFeed2          = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/id2");
+
+Adafruit_MQTT_Publish temperaturaFeed3 = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperatura3");
+Adafruit_MQTT_Publish umidadeFeed3     = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/umidade3");
+Adafruit_MQTT_Publish idFeed3          = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/id3");
+
+typedef struct dados_esp {
+	char id[30];
+	int temperatura;
+	int umidade;
+} dados_esp;
+
+dados_esp dadosRecebidos;
+uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+unsigned long ultimoEnvio = 0;
+
+void piscarLED(int tempo = 50) {
+	digitalWrite(LED_PIN, HIGH);
+	delay(tempo);
+	digitalWrite(LED_PIN, LOW);
+}
+
+void conectarWiFi() {
+	esp_wifi_set_promiscuous(true);
+	esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);  // Canal fixo
+	esp_wifi_set_promiscuous(false);
+
+	WiFi.begin(WLAN_SSID, WLAN_PASS);
+	while (WiFi.status() != WL_CONNECTED) {
+		delay(500);
+		Serial.print(".");
+	}
+	Serial.println("\nWi-Fi conectado!");
+}
+
+void MQTT_connect() {
+	if (mqtt.connected()) return;
+	int8_t ret;
+	while ((ret = mqtt.connect()) != 0) {
+		Serial.println(mqtt.connectErrorString(ret));
+		mqtt.disconnect();
+		delay(5000);
+	}
+	Serial.println("Conectado ao Adafruit IO!");
+}
+
+void debugSerial(const dados_esp& dados) {
+	Serial.println("--- Dados Recebidos via ESP-NOW ---");
+	Serial.print("ID: "); Serial.println(dados.id);
+	Serial.print("Temperatura: "); Serial.println(dados.temperatura);
+	Serial.print("Umidade: "); Serial.println(dados.umidade);
+	Serial.println("-----------------------------------");
+}
+
+void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+	memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
+	debugSerial(dadosRecebidos);
+
+	if (strcmp(dadosRecebidos.id, "esp2.Bea") == 0) {
+		temperaturaFeed2.publish(dadosRecebidos.temperatura);
+		umidadeFeed2.publish(dadosRecebidos.umidade);
+		idFeed2.publish(dadosRecebidos.id);
+	}
+	else if (strcmp(dadosRecebidos.id, "esp3.lucas") == 0) {
+		temperaturaFeed3.publish(dadosRecebidos.temperatura);
+		umidadeFeed3.publish(dadosRecebidos.umidade);
+		idFeed3.publish(dadosRecebidos.id);
+	}
+}
+
+void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
+	Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Enviado com sucesso" : "Falha no envio");
+}
+
+void setup() {
+	Serial.begin(115200);
+	pinMode(LED_PIN, OUTPUT);
+	dht.begin();
+
+	WiFi.mode(WIFI_STA);
+	conectarWiFi();
+
+	if (esp_now_init() != ESP_OK) {
+		Serial.println("Erro ao iniciar ESP-NOW");
+		return;
+	}
+
+	esp_now_register_send_cb(OnDataSent);
+	esp_now_register_recv_cb(OnDataRecv);
+
+	esp_now_peer_info_t peerInfo = {};
+	memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+	peerInfo.channel = 6;  // Canal fixo
+	peerInfo.encrypt = false;
+
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("Erro ao adicionar peer broadcast");
+		return;
+	}
+
+	Serial.println("Mestre pronto.");
+}
+
+void loop() {
+	MQTT_connect();
+	unsigned long agora = millis();
+
+	if (agora - ultimoEnvio >= INTERVALO_ENVIO_MS) {
+		dados_esp dadosLocais;
+		strcpy(dadosLocais.id, ID);
+		dadosLocais.temperatura = (int)dht.readTemperature();
+		dadosLocais.umidade = (int)dht.readHumidity();
+
+		if (!isnan(dadosLocais.temperatura) && !isnan(dadosLocais.umidade)) {
+			// Mostra no terminal
+			debugSerial(dadosLocais);
+
+			// Publica no Adafruit IO direto
+			temperaturaFeed1.publish(dadosLocais.temperatura);
+			umidadeFeed1.publish(dadosLocais.umidade);
+			idFeed1.publish(dadosLocais.id);
+
+			// Envia via ESP-NOW para os escravos
+			esp_now_send(broadcastAddress, (uint8_t*)&dadosLocais, sizeof(dadosLocais));
+
+			piscarLED();
+		} else {
+			Serial.println("Leitura inválida do DHT11");
+		}
+		ultimoEnvio = agora;
+	}
+
+	delay(100);
+}
