@@ -1,0 +1,124 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <DHT.h>
+
+// === IDENTIFICAÇÃO ÚNICA DO DISPOSITIVO ===
+#define ID "esp3.lucas"
+#define LED_PIN 2
+#define INTERVALO_ENVIO_MS 10000
+
+// === SENSOR DHT11 ===
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// === STRUCT DE DADOS A SEREM ENVIADOS E RECEBIDOS ===
+typedef struct dados_esp {
+	char id[30];
+	int temperatura;
+	int umidade;
+} dados_esp;
+
+uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+unsigned long ultimoEnvio = 0;
+
+// === AUXILIARES ===
+void piscarLED(int tempo = 50) {
+	digitalWrite(LED_PIN, HIGH);
+	delay(tempo);
+	digitalWrite(LED_PIN, LOW);
+}
+
+void enviarDadosReais() {
+	dados_esp dados;
+	strcpy(dados.id, ID);
+
+	float temp = dht.readTemperature();
+	float umid = dht.readHumidity();
+
+	if (isnan(temp) || isnan(umid)) {
+		Serial.println("Erro ao ler o sensor DHT11");
+		return;
+	}
+
+	dados.temperatura = (int)temp;
+	dados.umidade = (int)umid;
+
+	esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&dados, sizeof(dados));
+	if (result == ESP_OK) {
+		Serial.printf("Enviado DHT11 -> Temp: %d°C | Umid: %d%%\n", dados.temperatura, dados.umidade);
+	} else {
+		Serial.println("Erro ao enviar dados via ESP-NOW.");
+	}
+
+	piscarLED(100);
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+	Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Enviado com sucesso" : "Falha no envio");
+}
+
+void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+	dados_esp dadosRecebidos;
+	memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
+
+	if (strcmp(dadosRecebidos.id, ID) != 0) {
+		Serial.println("--- Dados Recebidos via ESP-NOW ---");
+		Serial.print("ID: "); Serial.println(dadosRecebidos.id);
+		Serial.print("Temperatura: "); Serial.println(dadosRecebidos.temperatura);
+		Serial.print("Umidade: "); Serial.println(dadosRecebidos.umidade);
+		Serial.println("-----------------------------------");
+	}
+}
+
+// === SETUP ===
+void setup() {
+	Serial.begin(115200);
+	pinMode(LED_PIN, OUTPUT);
+	dht.begin();
+
+	WiFi.mode(WIFI_STA);
+
+	int canal = 6;  // ⚠️ DEVE ser o mesmo usado no mestre
+
+	// Força o canal manualmente
+	esp_wifi_set_promiscuous(true);
+	esp_wifi_set_channel(canal, WIFI_SECOND_CHAN_NONE);
+	esp_wifi_set_promiscuous(false);
+
+	// Inicia ESP-NOW
+	if (esp_now_init() != ESP_OK) {
+		Serial.println("Erro ao iniciar ESP-NOW");
+		return;
+	}
+
+	esp_now_register_send_cb(OnDataSent);
+	esp_now_register_recv_cb(OnDataRecv);  // agora recebe dados também
+
+	esp_now_peer_info_t peerInfo = {};
+	memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+	peerInfo.channel = canal;
+	peerInfo.encrypt = false;
+
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("Erro ao adicionar peer broadcast");
+	} else {
+		Serial.println("Peer broadcast adicionado com sucesso!");
+	}
+
+	Serial.println("ESP escravo pronto.");
+	ultimoEnvio = millis();
+}
+
+// === LOOP ===
+void loop() {
+	unsigned long agora = millis();
+
+	if (agora - ultimoEnvio >= INTERVALO_ENVIO_MS) {
+		enviarDadosReais();
+		ultimoEnvio = agora;
+	}
+
+	delay(100);
+}
